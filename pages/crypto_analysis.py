@@ -78,7 +78,7 @@ def fetch_available_coins():
 
 
 @st.cache_data(ttl=300)
-def get_historical_data(coin_id, days=365):
+def get_historical_crypto_data(coin_id, days=365):
     """Fetch historical price data from CoinGecko with proper hourly granularity"""
     try:
         url = f'https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart'
@@ -456,7 +456,7 @@ def main():
                 st.warning("Hourly data is only available for periods up to 90 days. Please select a shorter time range for detailed hourly analysis.")
                 days = 90  # Limit to 90 days for hourly data
             
-            df = get_historical_data(coin_id, days)
+            df = get_historical_crypto_data(coin_id, days)
             
             if df is not None:
                 # Display metrics

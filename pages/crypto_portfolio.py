@@ -9,6 +9,9 @@ import uuid
 import numpy as np
 import re
 
+from datetime import datetime, timedelta
+import plotly.graph_objs as go
+
 from crypto_logo_helper import get_crypto_logo
 
 from config import get_db_path
@@ -111,13 +114,46 @@ st.markdown("""
             width: 100%;
         }
             
-        button[kind="secondary"] {
-            margin-left: 0rem;
-            margin-top: 0rem;
-            padding: 0.75rem;
-            width: 100%;
-            heigth: 65%;
-            border-radius: 10px;
+        /* button[kind="secondary"] */
+        /* Select elements with 'st-key-reset_button' in their class */
+        .stElementContainer.element-container.st-key-reset_button 
+            .stButton button {
+                margin-left: 4rem;
+                margin-top: 0rem;
+                padding: 0.5rem;
+                padding-top: 2rem;
+                padding-bottom: 2rem;
+                width: 50%;
+                heigth: 65%;
+                border-radius: 10px;
+                background-color: #e59866;
+        }
+
+            
+        .stElementContainer.element-container.st-key-clear_transactions
+            .stButton button {
+                margin-left: -6rem;
+                margin-top: 0rem;
+                padding: 0.5rem;
+                padding-top: 2rem;
+                padding-bottom: 2rem;
+                width: 70%;
+                heigth: 65%;
+                border-radius: 10px;
+        }
+            
+            
+        .stElementContainer.element-container.st-key-calculate_new_balance
+            .stButton button {
+                margin-left: 10rem;
+                margin-top: 1rem;
+                padding: 0.1rem;
+                padding-top: 1rem;
+                padding-bottom: 1rem;
+                width: 30%;
+                heigth: 45%;
+                border-radius: 10px;
+                background-color: #2980b9;
         }
             
             
@@ -188,6 +224,11 @@ st.markdown("""
         [data-testid="stFullScreenFrame"]{
             margin-left: 1rem;
             margin-top: 0.25rem;
+        }
+
+        .stPlotlyChart {
+            padding: 0;
+            margin-left: -1rem;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -394,10 +435,50 @@ def get_transaction(transaction_id):
         conn.close()
 
 
+def calculate_profit_withdrawal_options(transactions_df, coin_selected):
+    """Calculate withdrawal options based on profit"""
+    # Get all transactions for selected coin
+    coin_transactions = transactions_df[transactions_df['Asset'] == coin_selected].copy()
+    if coin_transactions.empty:
+        return None
+    
+    # Calculate current total profit/loss
+    total_quantity = coin_transactions['Quantity'].sum()
+    total_invested = coin_transactions['Total Cash Invested'].sum()
+    current_price = st.session_state.current_prices.get(coin_transactions.iloc[0]['Symbol'])
+    
+    if not current_price:
+        return None
+        
+    current_value = total_quantity * current_price
+    total_profit = current_value - total_invested
+    
+    # Calculate reference targets (10% to 50% of profit)
+    percentages = [10, 20, 30, 40, 50]
+    reference_targets = {
+        f"{p}%": {
+            'percentage': p,
+            'amount': (total_profit * p / 100),
+            'coins': (total_profit * p / 100) / current_price
+        } for p in percentages
+    }
+    
+    return {
+        'total_profit': total_profit,
+        'current_price': current_price,
+        'total_quantity': total_quantity,
+        'total_invested': total_invested,
+        'reference_targets': reference_targets,
+        'current_value': current_value
+    }
+
 
 # Session state management
 def init_session_state():
     """Initialize all required session state variables"""
+    if 'chart_days' not in st.session_state:
+        st.session_state.chart_days = '30'  # Default to 30 days
+
     if 'db_initialized' not in st.session_state:
         init_database()
         st.session_state.db_initialized = True
@@ -590,7 +671,193 @@ def create_percentage_bar(value):
     """
 
 
+# Add days selection in the sidebar
+def add_chart_settings_to_sidebar():
+    st.sidebar.markdown("### Chart Settings")
+    
+    # Days selection
+    days_options = {
+        '7': '7 Days',
+        '30': '30 Days',
+        '90': '90 Days',
+        '180': '180 Days',
+        '360': '360 Days'
+    }
+    selected_days = st.sidebar.selectbox(
+        "Price History Range",
+        options=list(days_options.keys()),
+        format_func=lambda x: days_options[x],
+        key="chart_days"
+    )
+    
+    # Chart type selection
+    chart_types = ['Candlestick', 'Line']
+    selected_type = st.sidebar.selectbox(
+        "Chart Type",
+        options=chart_types,
+        key="chart_type"
+    )
+    
+    return selected_days, selected_type
+
+# Update price history function to include OHLC data for candlesticks
+def get_coin_price_history(coin_id, days='30'):
+    """Fetch price history with OHLC data"""
+    try:
+        # For candlestick data
+        ohlc_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+        # For line chart data
+        line_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+        
+        headers = {
+            'accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0'
+        }
+        
+        if st.session_state.chart_type == 'Candlestick':
+            response = requests.get(
+                ohlc_url,
+                params={'vs_currency': 'usd', 'days': days},
+                headers=headers
+            )
+        else:
+            response = requests.get(
+                line_url,
+                params={'vs_currency': 'usd', 'days': days, 'interval': 'daily'},
+                headers=headers
+            )
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if st.session_state.chart_type == 'Candlestick':
+                # OHLC data format
+                dates = [datetime.fromtimestamp(candle[0]/1000) for candle in data]
+                ohlc = [[candle[1], candle[2], candle[3], candle[4]] for candle in data]
+                return dates, ohlc
+            else:
+                # Line chart format
+                prices = data['prices']
+                dates = [datetime.fromtimestamp(price[0]/1000) for price in prices]
+                values = [price[1] for price in prices]
+                return dates, values
+            
+        print(f"Failed to fetch price history: Status {response.status_code}")
+        return None, None
+    except Exception as e:
+        print(f"Error fetching price history: {e}")
+        return None, None
+
+def create_sparkline(dates, prices, current_price, purchase_price):
+    """Create a sparkline chart with weekly interval lines and price annotations"""
+    if not dates or not prices:
+        return None
+    
+    fig = go.Figure()
+    
+    # Helper function to find price at specific date
+    def get_price_at_date(target_date):
+        for i, date in enumerate(dates):
+            if date.date() == target_date.date():
+                return prices[i] if isinstance(prices[0], (int, float)) else prices[i][3]
+        return None
+    
+    # Add the price data based on chart type
+    if st.session_state.chart_type == 'Candlestick':
+        fig.add_trace(
+            go.Candlestick(
+                x=dates,
+                open=[p[0] for p in prices],
+                high=[p[1] for p in prices],
+                low=[p[2] for p in prices],
+                close=[p[3] for p in prices],
+                increasing=dict(line=dict(color='#00ff00')),
+                decreasing=dict(line=dict(color='#ff0000')),
+                showlegend=False
+            )
+        )
+    else:
+        # Line chart with daily color changes
+        for i in range(1, len(dates)):
+            color = '#00ff00' if prices[i] >= prices[i-1] else '#ff0000'
+            fig.add_trace(
+                go.Scatter(
+                    x=dates[i-1:i+1],
+                    y=prices[i-1:i+1] if isinstance(prices[0], (int, float)) else [p[3] for p in prices[i-1:i+1]],
+                    mode='lines',
+                    line=dict(color=color, width=1.5),
+                    hoverinfo='y',
+                    showlegend=False
+                )
+            )
+    
+    # Add weekly interval lines and annotations
+    start_date = min(dates)
+    end_date = max(dates)
+    current_date = start_date
+    while current_date <= end_date:
+        # Only add line and annotation if it's the start of a week (Monday)
+        if current_date.weekday() == 0:
+            # Add vertical line
+            fig.add_vline(
+                x=current_date,
+                line_width=1,
+                line_dash="dot",
+                line_color="rgba(255, 255, 255, 0.1)"
+            )
+            
+            # Get price at this date
+            price = get_price_at_date(current_date)
+            if price is not None:
+                # Add price annotation
+                fig.add_annotation(
+                    x=current_date,
+                    y=price,
+                    text=f"${price:,.2f}",
+                    showarrow=False,
+                    font=dict(
+                        size=8,
+                        color="rgba(255, 255, 255, 0.5)"
+                    ),
+                    yshift=10  # Slight shift above the line
+                )
+        
+        current_date += timedelta(days=1)
+    
+    # Update layout for minimal appearance
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=10, b=0),  # Added top margin for annotations
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        showlegend=False,
+        height=45,  # Increased height slightly for annotations
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            visible=False,
+            range=[start_date, end_date]
+        ),
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            visible=False
+        ),
+        hovermode='x unified'
+    )
+    
+    return fig
+
+
+
+
+
 def main():
+    # In your main app layout, add the days selector to sidebar
+    # Add this near the top of your main section
+    selected_days, selected_type = add_chart_settings_to_sidebar()
+
+
+
     # Initialize database if not exists
     if 'db_initialized' not in st.session_state:
         init_database()
@@ -809,9 +1076,9 @@ def main():
                         
                         
                         # Create headers
-                        col_headers = st.columns([2, 1, 2, 2, 2, 2, 2, 2, 2, 2,1,1])
+                        col_headers = st.columns([2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1])
                         headers = ['Purchase Date', 'Logo', 'Asset', 'Quantity', 'Invested Cash', 
-                                 'Purchase Price', 'Current Price', 'Profit/Loss', "% Yield", "Performance"]
+                                 'Purchase Price', 'Current Price', 'Chart', 'Profit/Loss', "% Yield", "Performance"]
                         
                         for col, header in zip(col_headers[:-1], headers):
                             with col:
@@ -838,7 +1105,7 @@ def main():
 
                         # Display transactions
                         for index, row in st.session_state.transactions.iterrows():
-                            cols = st.columns([2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1,1])
+                            cols = st.columns([2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1])
                             if index == 0:
                                 margin_value = 1
                             elif index == len(st.session_state.transactions) - 1:
@@ -929,7 +1196,34 @@ def main():
                                     st.markdown(f"<p style='margin-top:{margin_value}rem;'>Price unavailable</p>", 
                                               unsafe_allow_html=True)
                             
-                            with cols[7]:  # Profit/Loss
+                            with cols[7]:
+                                try:
+                                    if index == 0:
+                                        st.write('')
+                                    if 'Symbol' in row:
+                                        dates, prices = get_coin_price_history(
+                                            row['Symbol'].lower(), 
+                                            days=st.session_state.chart_days
+                                        )
+                                        if dates and prices:
+                                            current_price = st.session_state.current_prices.get(row['Symbol'])
+                                            fig = create_sparkline(
+                                                dates, 
+                                                prices, 
+                                                current_price, 
+                                                row['Purchase Price']
+                                            )
+                                            if fig:
+                                                st.plotly_chart(fig, use_container_width=True, key=f"chart_{index}")
+                                            else:
+                                                st.write("No data")
+                                        else:
+                                            st.write("No data")
+                                except Exception as e:
+                                    st.write(f"Chart error: {e}")
+
+
+                            with cols[8]:  # Profit/Loss
                                 if current_price:
                                     profit_loss = calculate_profit_loss(row['Quantity'], 
                                                                       row['Purchase Price'], 
@@ -945,7 +1239,7 @@ def main():
                                 else:
                                     st.markdown(f"<p style='margin-top:{margin_value}rem;'>-</p>", 
                                               unsafe_allow_html=True)
-                            with cols[8]: # % Yield
+                            with cols[9]: # % Yield
                                 if current_price:
                                     # import numpy as np
                                     profit_loss = calculate_profit_loss(row['Quantity'], 
@@ -967,7 +1261,7 @@ def main():
                                     st.markdown(f"<p style='margin-top:{margin_value}rem;'>-</p>", 
                                               unsafe_allow_html=True)
                             
-                            with cols[9]:  # Performance column
+                            with cols[10]:  # Performance column
                                 if current_price:
                                     if index == 0:
                                         st.write("")
@@ -977,17 +1271,40 @@ def main():
                                     performance_rate = profit_loss * 100 / row['Total Cash Invested']
                                     st.markdown(create_percentage_bar(performance_rate), unsafe_allow_html=True)
 
-                            with cols[10]:  # Edit/Delete Buttons
+                            with cols[11]:  # Edit/Delete Buttons
                                 if index == 0:
                                     st.write('')
+                                st.markdown(f"""<style>
+                                            .stElementContainer.element-container.st-key-edit_{row['id']}
+                                                {{
+                                                    margin-top: -1.1rem;
+                                                    margin-left: -0.5rem;
+                                                    padding: .9rem;
+                                                    padding-top: 0.4rem;
+                                                    padding-bottom: 0.4rem;
+                                                    border-radius: 5px;
+                                            }}                                  
+                                </style>""", unsafe_allow_html=True)
+                                # st.write('<div style="margin-top: -2rem;"></div>', unsafe_allow_html=True)
                                 if st.button('✏️', key=f"edit_{row['id']}"):
                                     st.session_state.editing_transaction = row['id']
                                     st.session_state.edit_mode = True
                                     st.rerun()
 
-                            with cols[11]:
+                            with cols[12]:
                                 if index == 0:
                                     st.write('')
+                                st.markdown(f"""<style>
+                                            .stElementContainer.element-container.st-key-delete_{row['id']}
+                                                {{
+                                                    margin-top: -1.1rem;
+                                                    margin-left: -1.25rem;
+                                                    padding: .9rem;
+                                                    padding-top: 0.4rem;
+                                                    padding-bottom: 0.4rem;
+                                                    border-radius: 5px;
+                                            }}                                  
+                                </style>""", unsafe_allow_html=True)
                                 if st.button('🗑️', key=f"delete_{row['id']}"):
                                     if delete_transaction(row['id']):
                                         st.success("Transaction deleted!")
@@ -1004,6 +1321,10 @@ def main():
                                 st.markdown(f"""
                                     <hr style='margin-top:{0}rem;margin-bottom:0rem;border: 0.25px dash white;'>
                                 """, unsafe_allow_html=True)
+
+                        
+                        
+                            
                         
                         # Calculate and display summary statistics
                         st.write("")
@@ -1111,6 +1432,8 @@ def main():
                                 )
                         
 
+                        
+
                         st.write("")
                         # Asset summary
                         st.markdown("""
@@ -1172,30 +1495,168 @@ def main():
                             )
                         
                         # Control buttons
-                        st.markdown("<hr style='margin-top:2rem;margin-bottom:2rem;border:1px solid #2d3436;'>",
-                                  unsafe_allow_html=True)
+                        # st.markdown("<hr style='margin-top:2rem;margin-bottom:2rem;border:1px solid #2d3436;'>",
+                        #           unsafe_allow_html=True)
                         
-                        left_button_space, col1, col2, right_button_space = st.columns([2,3,3,2])
+                        left_button_space, col1, col2, right_button_space = st.columns([4,3,3,4])
                         with col1:
                             if st.button('Refresh Prices', key="reset_button", type="secondary"):
                                 st.rerun()
                         
                         with col2:
-                            if st.button('Clear All Transactions', type="secondary"):
+                            if st.button('Clear All Transactions', type="secondary", key="clear_transactions"):
                                 clear_transactions()
                                 st.session_state.transactions = load_transactions()
                                 st.success('All transactions cleared!')
 
 
+            # Add this to your main app
+            st.markdown("<hr>", unsafe_allow_html=True)
+            st.header("New Balance if Withdrawal")
+
+            if not st.session_state.transactions.empty:
+                unique_coins = st.session_state.transactions['Asset'].unique()
+                
+                col1, col2 = st.columns([3, 7])
+                
+                with col1:
+                    selected_coin = st.selectbox(
+                        "Select Coin to Withdraw",
+                        options=unique_coins,
+                        key="withdrawal_coin"
+                    )
+                    
+                    profit_data = calculate_profit_withdrawal_options(
+                        st.session_state.transactions,
+                        selected_coin
+                    )
+                    
+                    if profit_data and profit_data['total_profit'] > 0:
+                        # Show total profit
+                        st.metric(
+                            "Total Profit Available",
+                            f"${profit_data['total_profit']:,.2f}",
+                            help="Current profit for selected coin"
+                        )
+                        
+                        # Reference targets
+                        st.markdown("### Reference Targets")
+                        ref_cols = st.columns(5)
+                        for i, (label, data) in enumerate(profit_data['reference_targets'].items()):
+                            with ref_cols[i]:
+                                st.markdown(f"""
+                                    <div style='text-align: center; border: 1px solid rgba(255,255,255,0.1); 
+                                    padding: 5px; border-radius: 5px;'>
+                                        <div style='font-size: 0.8em; color: rgba(255,255,255,0.6);'>{label}</div>
+                                        <div style='font-size: 0.9em;'>${data['amount']:,.2f}</div>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                        
+                        # Custom withdrawal input
+                        st.markdown("### Custom Withdrawal")
+                        withdrawal_amount = st.number_input(
+                            "Enter withdrawal amount ($)",
+                            min_value=0.0,
+                            max_value=float(profit_data['total_profit']),
+                            value=0.0,
+                            step=100.0,
+                            key="custom_withdrawal"
+                        )
+                        
+                        # Show percentage of profit
+                        if withdrawal_amount > 0:
+                            withdrawal_percentage = (withdrawal_amount / profit_data['total_profit']) * 100
+                            withdrawal_coins = withdrawal_amount / profit_data['current_price']
+                            st.markdown(f"""
+                                <div style='margin-top: 10px;'>
+                                    <span style='color: rgba(255,255,255,0.6);'>This represents:</span><br/>
+                                    • {withdrawal_percentage:.1f}% of your profit<br/>
+                                    • {withdrawal_coins:.4f} coins
+                                </div>
+                            """, unsafe_allow_html=True)
+                        
+
+                        
+                        if st.button("Calculate New Balance", type="secondary", key="calculate_new_balance"):
+                            if withdrawal_amount > 0:
+                                with col2:
+                                    withdrawal_coins = withdrawal_amount / profit_data['current_price']
+                                    st.markdown("### Impact Analysis")
+                                    
+                                    # Holdings
+                                    st.markdown("#### Holdings")
+                                    cols = st.columns(2)
+                                    with cols[0]:
+                                        st.metric(
+                                            "Original Quantity",
+                                            f"{profit_data['total_quantity']:.4f}"
+                                        )
+                                    with cols[1]:
+                                        new_quantity = profit_data['total_quantity'] - withdrawal_coins
+                                        st.metric(
+                                            "New Quantity",
+                                            f"{new_quantity:.4f}",
+                                            delta=f"-{withdrawal_coins:.4f}"
+                                        )
+                                    
+                                    # Investment Values
+                                    st.markdown("#### Investment")
+                                    withdrawal_ratio = withdrawal_coins / profit_data['total_quantity']
+                                    new_invested = profit_data['total_invested'] * (1 - withdrawal_ratio)
+                                    
+                                    cols = st.columns(2)
+                                    with cols[0]:
+                                        st.metric(
+                                            "Original Investment",
+                                            f"${profit_data['total_invested']:,.2f}"
+                                        )
+                                    with cols[1]:
+                                        st.metric(
+                                            "New Investment",
+                                            f"${new_invested:,.2f}",
+                                            delta=f"-${profit_data['total_invested'] - new_invested:,.2f}"
+                                        )
+                                    
+                                    # Market Value & P/L
+                                    st.markdown("#### Market Value & P/L")
+                                    new_market_value = new_quantity * profit_data['current_price']
+                                    new_profit_loss = new_market_value - new_invested
+                                    
+                                    cols = st.columns(2)
+                                    with cols[0]:
+                                        st.metric(
+                                            "Market Value",
+                                            f"${profit_data['current_value']:,.2f}"
+                                        )
+                                    with cols[1]:
+                                        st.metric(
+                                            "New Market Value",
+                                            f"${new_market_value:,.2f}",
+                                            delta=f"-{withdrawal_amount:,.2f}"
+                                        )
+                                    
+                                    pl_color = "normal" if new_profit_loss >= 0 else "inverse"
+                                    st.metric(
+                                        "New Profit/Loss",
+                                        f"${new_profit_loss:,.2f}",
+                                        delta=f"${new_profit_loss:,.2f}",
+                                        delta_color=pl_color
+                                    )
+                    else:
+                        st.warning("No profit available for withdrawal on this coin")
+            else:
+                st.info("No transactions available. Add some transactions to use this feature.")
+
+
             if auto_refresh:
-                time.sleep(30)  # Wait for 1 second before next update
+                time.sleep(60)  # Wait for 60 second before next update
                 st.rerun()
             else:
                 break
                 
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
-            time.sleep(5)
+            time.sleep(15)
             continue
 
 if __name__ == "__main__":
