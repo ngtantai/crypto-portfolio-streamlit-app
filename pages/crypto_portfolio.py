@@ -10,7 +10,7 @@ import numpy as np
 import re
 
 from datetime import datetime, timedelta
-import plotly.graph_objs as go
+# import plotly.graph_objs as go
 
 from crypto_logo_helper import get_crypto_logo
 
